@@ -126,6 +126,55 @@ torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
     
     // -------- YOUR CODE HERE  -------- //
     
+    // For each Batch
+    for (int b = 0; b < B; b++) {
+        // For each Head
+        for (int h = 0; h < H; h++) {
+
+            // a. Multiply Q (N, d) with K^t (d, N), storing it in QK^t (N, N)
+            //     QK^t[i][j] += Q[i][k] * K^t[k][j] => Q[i][k] * K[j][k]
+            //     So we can iterate j then k to emulate transpose K
+            for (int i = 0; i < N; i++) {
+                for (int j = 0; j < N; j++) {
+                    float qkt_val = 0.0;
+                    for (int k = 0; k < d; k++) {
+                        float q_val = fourDimRead(Q, b, h, i, k, H, N, d); // Q[b][h][i][k]
+                        float k_val = fourDimRead(K, b, h, j, k, H, N, d); // K[b][h][j][k]
+                        qkt_val += q_val * k_val;
+                    }
+                    twoDimWrite(QK_t, i, j, N, qkt_val);
+                }
+            }
+            
+            // b. Perform softmax for each row in QK^t (N, N)
+            for (int i = 0; i < N; i++) {
+                // Calculate sum of exponentials of row i
+                float sum_exp = 0.0f;
+                for (int j = 0; j < N; j++) {
+                    QK_t[i * N + j] = std::exp(QK_t[i * N + j]);
+                    sum_exp += QK_t[i * N + j];
+                }
+                // Normalize each element
+                for (int j = 0; j < N; j++) {
+                    QK_t[i * N + j] /= sum_exp;
+                }
+            }
+
+            // c. Matrix multiply QK^t with V and store it into O
+            for (int i = 0; i < N; i++) {
+                for (int j = 0; j < d; j++) {
+                    float o_val = 0.0f;
+                    for (int k = 0; k < N; k++) {
+                        float qk_val = twoDimRead(QK_t, i, k, N); // QK_t[i][k]
+                        float v_val = fourDimRead(V, b, h, k, j, H, N, d); // V[b][h][k][j]
+                        o_val += qk_val * v_val;
+                    }
+                    fourDimWrite(O, b, h, i, j, H, N, d, o_val); // O[b][h][i][j]
+                }
+            }
+        }
+    }
+
     // DO NOT EDIT THIS RETURN STATEMENT //
     // It formats your C++ Vector O back into a Tensor of Shape (B, H, N, d) and returns it //
     return torch::from_blob(O.data(), {B, H, N, d}, torch::TensorOptions().dtype(torch::kFloat32)).clone();
