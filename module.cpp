@@ -204,7 +204,77 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
     std::vector<float> QK_t = formatTensor(QK_tTensor);
 
     // -------- YOUR CODE HERE  -------- //
+    const int B_N = 32;
+    const int B_d = 32;
 
+    // For each Batch
+    for (int b = 0; b < B; b++) {
+        // For each Head
+        for (int h = 0; h < H; h++) {
+
+            // a. Mat mul of Q with K^t
+            for (int i = 0; i < N; i++) {
+                for (int j = 0; j < N; j++) {
+                    float qkt_val = 0.0;
+                    for (int k = 0; k < d; k++) {
+                        float q_val = fourDimRead(Q, b, h, i, k, H, N, d); // Q[b][h][i][k]
+                        float k_val = fourDimRead(K, b, h, j, k, H, N, d); // K[b][h][j][k]
+                        qkt_val += q_val * k_val;
+                    }
+                    twoDimWrite(QK_t, i, j, N, qkt_val);
+                }
+            }
+
+            // b. Perform softmax for each row in QK^t (N, N)
+            for (int i = 0; i < N; i++) {
+                // Calculate sum of exponentials of row i
+                float sum_exp = 0.0f;
+                for (int j = 0; j < N; j++) {
+                    QK_t[i * N + j] = std::exp(QK_t[i * N + j]);
+                    sum_exp += QK_t[i * N + j];
+                }
+                // Normalize each element
+                for (int j = 0; j < N; j++) {
+                    QK_t[i * N + j] /= sum_exp;
+                }
+            }
+
+            // c. Blocked mat mul of QK^t with V and store it into O
+            for (int i0 = 0; i0 < N; i0 += B_N) {
+                for (int j0 = 0; j0 < d; j0 += B_d) {
+                    int i_max = std::min(i0 + B_N, N);
+                    int j_max = std::min(j0 + B_d, d);
+
+                    // Allocate a local block for O
+                    float o_block[B_N][B_d] = {0};
+
+                    for (int k0 = 0; k0 < N; k0 += B_N) {
+                        int k_max = std::min(k0 + B_N, N);
+
+                        // Compute mat mul of the local block
+                        for (int i = i0; i < i_max; i++) {
+                            for (int j = j0; j < j_max; j++) {
+                                for (int k = k0; k < k_max; k++) {
+                                    float qk_val = twoDimRead(QK_t, i, k, N); // QK_t[i][k]
+                                    float v_val = fourDimRead(V, b, h, k, j, H, N, d); // V[b][h][k][j]
+                                    o_block[i - i0][j - j0] += qk_val * v_val;
+                                }
+                            }
+                        }
+                    }
+
+                    // Write the computed block back to O
+                    for (int i = i0; i < i_max; i++) {
+                        for (int j = j0; j < j_max; j++) {
+                            float o_val = o_block[i - i0][j - j0];
+                            fourDimWrite(O, b, h, i, j, H, N, d, o_val); // O[b][h][i][j]
+                        }
+                    }
+                }
+            }
+
+        }
+    }
     // DO NOT EDIT THIS RETURN STATEMENT //
     // It formats your C++ Vector O back into a Tensor of Shape (B, H, N, d) and returns it //
     return torch::from_blob(O.data(), {B, H, N, d}, torch::TensorOptions().dtype(torch::kFloat32)).clone();
