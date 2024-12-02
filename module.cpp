@@ -204,6 +204,7 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
     std::vector<float> QK_t = formatTensor(QK_tTensor);
 
     // -------- YOUR CODE HERE  -------- //
+    // Define block size
     const int B_N = 32;
     const int B_d = 32;
 
@@ -212,16 +213,52 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
         // For each Head
         for (int h = 0; h < H; h++) {
 
-            // a. Mat mul of Q with K^t
-            for (int i = 0; i < N; i++) {
-                for (int j = 0; j < N; j++) {
-                    float qkt_val = 0.0;
-                    for (int k = 0; k < d; k++) {
-                        float q_val = fourDimRead(Q, b, h, i, k, H, N, d); // Q[b][h][i][k]
-                        float k_val = fourDimRead(K, b, h, j, k, H, N, d); // K[b][h][j][k]
-                        qkt_val += q_val * k_val;
+            // a. Matmul of Q with K^t
+            for (int i0 = 0; i0 < N; i0 += B_N) {
+                for (int j0 = 0; j0 < N; j0 += B_d) {
+                    int i_max = std::min(i0 + B_N, N);
+                    int j_max = std::min(j0 + B_N, N);
+
+                    // block for local QK_t result
+                    float QK_t_block[B_N][B_N] = {0};
+
+                    for (int k0 = 0; k0 < d; k0 += B_d) {
+                        int k_max = std::min(k0 + B_d, d);
+
+                        // load blocks of Q and K into local buffers
+                        float Q_block[B_N][B_d] = {0};
+                        float K_block[B_N][B_d] = {0};
+                        for (int i = i0; i < i_max; i++) {
+                            for (int k = k0; k < k_max; k++) {
+                                Q_block[i - i0][k - k0] = fourDimRead(Q, b, h, i, k, H, N, d); // Q[b][h][i][k]
+                            }
+                        }
+                        for (int j = j0; j < j_max; j++) {
+                            for (int k = k0; k < k_max; k++) {
+                                K_block[j - j0][k - k0] = fourDimRead(K, b, h, j, k, H, N, d); // K[b][h][j][k]
+                            }
+                        }
+
+                        // Compute mat mul of the local block
+                        for (int i = i0; i < i_max; i++) {
+                            for (int j = j0; j < j_max; j++) {
+                                for (int k = k0; k < k_max; k++) {
+                                    float q_val = Q_block[i - i0][k - k0];
+                                    float k_val = K_block[j - j0][k - k0];
+                                    QK_t_block[i - i0][j - j0] += q_val * k_val;
+                                }
+                            }
+                        }
                     }
-                    twoDimWrite(QK_t, i, j, N, qkt_val);
+
+                    // Write the computed block back to O
+                    for (int i = i0; i < i_max; i++) {
+                        for (int j = j0; j < j_max; j++) {
+                            float qkt_val = QK_t_block[i - i0][j - j0];
+                            twoDimWrite(QK_t, i, j, N, qkt_val);
+                        }
+                    }
+                    
                 }
             }
 
@@ -239,7 +276,7 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
                 }
             }
 
-            // c. Blocked mat mul of QK^t with V and store it into O
+            // c. Blocked matmul of QK^t with V and store it into O
             for (int i0 = 0; i0 < N; i0 += B_N) {
                 for (int j0 = 0; j0 < d; j0 += B_d) {
                     int i_max = std::min(i0 + B_N, N);
@@ -251,7 +288,7 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
                     for (int k0 = 0; k0 < N; k0 += B_N) {
                         int k_max = std::min(k0 + B_N, N);
 
-                        // Compute mat mul of the local block
+                        // Compute matmul of the local block
                         for (int i = i0; i < i_max; i++) {
                             for (int j = j0; j < j_max; j++) {
                                 for (int k = k0; k < k_max; k++) {
