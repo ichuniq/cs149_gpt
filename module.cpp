@@ -251,7 +251,7 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
                         }
                     }
 
-                    // Write the computed block back to O
+                    // Write the computed block back to QK_t
                     for (int i = i0; i < i_max; i++) {
                         for (int j = j0; j < j_max; j++) {
                             float qkt_val = QK_t_block[i - i0][j - j0];
@@ -345,21 +345,52 @@ torch::Tensor myFusedAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
 
     // -------- YOUR CODE HERE  -------- //
     // We give you a template of the first three loops for your convenience
-    //loop over batch
-    for (int b = 0; b < B; b++){
+    
+    #pragma omp parallel for collapse(3)
+    for (int b = 0; b < B; b++) {
 
-        //loop over heads
-        for (int h = 0; h < H; h++){
-            for (int i = 0; i < N ; i++){
-
-		// YRow is moved inside so each OpenMP thread gets a local copy.
+        // Loop over heads
+        for (int h = 0; h < H; h++) {
+            
+            // For each row
+            for (int i = 0; i < N ; i++) {
+                
+                // Each OpenMP thread gets its own copy
                 at::Tensor ORowTensor = temp.index({torch::indexing::Slice(omp_get_thread_num(), torch::indexing::None)});      
                 std::vector<float> ORow = formatTensor(ORowTensor);
-		//YOUR CODE HERE
+
+                float sum_exp = 0.0f;
+                // Compute Q[i] x K^T for all j
+                for (int j = 0; j < N; j++) {
+                    float score = 0.0;
+                    for (int k = 0; k < d; k++) {
+                        float q_val = fourDimRead(Q, b, h, i, k, H, N, d); // Q[b][h][i][k]
+                        float k_val = fourDimRead(K, b, h, j, k, H, N, d); // K[b][h][j][k]
+                        score += q_val * k_val;
+                    }
+                    // Calculate exp. score for softmax along the way
+                    ORow[j] = std::exp(score);
+                    sum_exp += ORow[j];
+                }
+                // Normalize
+                for (int j = 0; j < N; j++) {
+                    ORow[j] /= sum_exp;
+                }
+                
+                // Matmul of ORow (1, N) with V (N, d)
+                // For each col of V
+                for (int j = 0; j < d; j++) {
+                    float o_val = 0.0f;
+                    for (int k = 0; k < N; k++) {
+                        float v_val = fourDimRead(V, b, h, k, j, H, N, d); // V[b][h][k][j]
+                        o_val += ORow[k] * v_val;
+                    }
+                    // Write to O
+                    fourDimWrite(O, b, h, i, j, H, N, d, o_val); // O[b][h][i][j]
+                }
             }
-	}
+	    }
     }
-	    
 	
     // DO NOT EDIT THIS RETURN STATEMENT //
     // It formats your C++ Vector O back into a Tensor of Shape (B, H, N, d) and returns it //
