@@ -213,52 +213,29 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
         // For each Head
         for (int h = 0; h < H; h++) {
 
-            // a. Matmul of Q with K^t
+            // a. Blocked matmul of Q with K^t
             for (int i0 = 0; i0 < N; i0 += B_N) {
                 for (int j0 = 0; j0 < N; j0 += B_d) {
+                    // Ending indices of the current block
                     int i_max = std::min(i0 + B_N, N);
                     int j_max = std::min(j0 + B_N, N);
-
-                    // block for local QK_t result
-                    float QK_t_block[B_N][B_N] = {0};
 
                     for (int k0 = 0; k0 < d; k0 += B_d) {
                         int k_max = std::min(k0 + B_d, d);
 
-                        // load blocks of Q and K into local buffers
-                        float Q_block[B_N][B_d] = {0};
-                        float K_block[B_N][B_d] = {0};
-                        for (int i = i0; i < i_max; i++) {
-                            for (int k = k0; k < k_max; k++) {
-                                Q_block[i - i0][k - k0] = fourDimRead(Q, b, h, i, k, H, N, d); // Q[b][h][i][k]
-                            }
-                        }
-                        for (int j = j0; j < j_max; j++) {
-                            for (int k = k0; k < k_max; k++) {
-                                K_block[j - j0][k - k0] = fourDimRead(K, b, h, j, k, H, N, d); // K[b][h][j][k]
-                            }
-                        }
-
-                        // Compute mat mul of the local block
+                        // Compute matmul for the current block
                         for (int i = i0; i < i_max; i++) {
                             for (int j = j0; j < j_max; j++) {
+                                float qkt_val = QK_t[i * N + j];
                                 for (int k = k0; k < k_max; k++) {
-                                    float q_val = Q_block[i - i0][k - k0];
-                                    float k_val = K_block[j - j0][k - k0];
-                                    QK_t_block[i - i0][j - j0] += q_val * k_val;
+                                    float q_val = fourDimRead(Q, b, h, i, k, H, N, d); // Q[b][h][i][k]
+                                    float k_val = fourDimRead(K, b, h, j, k, H, N, d); // K[b][h][j][k]
+                                    qkt_val += q_val * k_val;
                                 }
+                                QK_t[i * N + j] = qkt_val;
                             }
                         }
                     }
-
-                    // Write the computed block back to QK_t
-                    for (int i = i0; i < i_max; i++) {
-                        for (int j = j0; j < j_max; j++) {
-                            float qkt_val = QK_t_block[i - i0][j - j0];
-                            twoDimWrite(QK_t, i, j, N, qkt_val);
-                        }
-                    }
-                    
                 }
             }
 
@@ -282,29 +259,20 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
                     int i_max = std::min(i0 + B_N, N);
                     int j_max = std::min(j0 + B_d, d);
 
-                    // Allocate a local block for O
-                    float o_block[B_N][B_d] = {0};
-
                     for (int k0 = 0; k0 < N; k0 += B_N) {
                         int k_max = std::min(k0 + B_N, N);
 
-                        // Compute matmul of the local block
+                        // Compute matmul for the current block
                         for (int i = i0; i < i_max; i++) {
                             for (int j = j0; j < j_max; j++) {
+                                float o_val = fourDimRead(O, b, h, i, j, H, N, d);
                                 for (int k = k0; k < k_max; k++) {
                                     float qk_val = twoDimRead(QK_t, i, k, N); // QK_t[i][k]
                                     float v_val = fourDimRead(V, b, h, k, j, H, N, d); // V[b][h][k][j]
-                                    o_block[i - i0][j - j0] += qk_val * v_val;
+                                    o_val += qk_val * v_val;
                                 }
+                                fourDimWrite(O, b, h, i, j, H, N, d, o_val);
                             }
-                        }
-                    }
-
-                    // Write the computed block back to O
-                    for (int i = i0; i < i_max; i++) {
-                        for (int j = j0; j < j_max; j++) {
-                            float o_val = o_block[i - i0][j - j0];
-                            fourDimWrite(O, b, h, i, j, H, N, d, o_val); // O[b][h][i][j]
                         }
                     }
                 }
