@@ -64,9 +64,9 @@ std::vector<float> formatTensor(torch::Tensor tensor) {
  *
  * N (Sequence Length) - The number of tokens. You may think of this as the number of words in a sample.
  *
- * d (Embedding Dimensionality) - The number of features each token encodes per attention head. Let's
+ * d (Embecing Dimensionality) - The number of features each token encodes per attention head. Let's
  * say I encoded a word using the follow (length, number of vowels, has a capital letters). The
- * emvedded dimensionaliy would be 3.
+ * emveced dimensionaliy would be 3.
  * */
 
 // ---------------------------------------------------------- //
@@ -102,7 +102,7 @@ torch::Tensor myNaiveAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
                  //loop over Sequence Length
                  for (int i = 0; i < N; i++) {
 
-                     //loop over Embedding Dimensionality
+                     //loop over Embecing Dimensionality
                      for (int j = 0; j < d; j++) {
                         float val = fourDimRead(Q, b, h, i, j, H, N, d);
                         val = 0.0;
@@ -218,7 +218,7 @@ torch::Tensor myUnfusedAttentionBlocked(torch::Tensor QTensor, torch::Tensor KTe
                 for (int j0 = 0; j0 < N; j0 += B_d) {
                     // Ending indices of the current block
                     int i_max = std::min(i0 + B_N, N);
-                    int j_max = std::min(j0 + B_N, N);
+                    int j_max = std::min(j0 + B_d, N);
 
                     for (int k0 = 0; k0 < d; k0 += B_d) {
                         int k_max = std::min(k0 + B_d, d);
@@ -405,6 +405,78 @@ torch::Tensor myFlashAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
     std::vector<float> lnew = formatTensor(LnewTensor);
 
     // -------- YOUR CODE HERE  -------- //
+    for (int b = 0; b < B; b++) {
+        // Loop over heads
+        for (int h = 0; h < H; h++) {
+
+            // Loop over Tc = ceil(N / Bc) blocks
+            for (int j0 = 0; j0 < N; j0 += Bc) {
+                int j_max = std::min(j0 + Bc, N);
+
+                // Load Kj and Vj, both have shape (Bc, d), to local memory blocks
+                for (int c = j0; c < j_max; c++) {
+                    for (int r = 0; r < d; r++) {
+                        Kj[(c - j0)*d + r] = fourDimRead(K, b, h, c, r, H, N, d); // K[b][h][c][r]
+                        Vj[(c - j0)*d + r] = fourDimRead(V, b, h, c, r, H, N, d); // V[b][h][c][r]
+                    }
+                }
+
+                // Loop over Tr = ceil(N / Br) blocks
+                for (int i0 = 0; i0 < N; i0 += Br) {
+                    int i_max = std::min(i0 + Br, N);
+
+                    // Load Q_i, O_i and l_i to local memory
+                    // Q_i, O_i, PV have shape (Br, d); l_i, l_ij, l_new have shape (Br)
+                    for (int r = i0; r < i_max; r++) {
+                        for (int c = 0; c < d; c++) {
+                            Qi[(r - i0) * d + c] = fourDimRead(Q, b, h, r, c, H, N, d);
+                            Oi[(r - i0) * d + c] = fourDimRead(O, b, h, r, c, H, N, d);
+                        }
+                        li[r - i0] = l[r];
+                    }
+
+                    // Compute S_ij (Br, Bc) <-- Q_i (Br, d) @ K_j^T (d, Bc)
+                    // Compute P_ij (Br, Bc) <-- exp(S_ij)
+                    for (int r = i0; r < i_max; r++) {
+                        int rr = r - i0; // local row index
+
+                        for (int c = j0; c < j_max; c++) {
+                            int cc = c - j0; // local column index
+
+                            float qkt_val = Sij[rr * Bc + cc];
+                            for (int k = 0; k < d; k++) {
+                                float q_val = Qi[rr * d + k]; // Qi[r - i0][k];
+                                float k_val = Kj[cc * d + k]; // Kj[c - j0][k];
+                                qkt_val += q_val * k_val;
+                            }
+                            Sij[rr * Bc + cc] = qkt_val;
+                            Pij[rr * Bc + cc] = std::exp(qkt_val);
+                        }
+                    }
+
+                    // Compute l_ij (Br) <-- rowSum(P_ij)
+                    for (int r = i0; r < i_max; r++) {
+                        int rr = r - i0; // local row index
+                        float row_sum = 0.0;
+                        for (int c = j0; c < j_max; c++) {
+                            int cc = c - j0; // local column index
+                            row_sum += Pij[rr * Bc + cc];
+                        }
+                        lij[rr] = row_sum;
+                        // l_new = l_i + l_ij
+                        lnew[rr] = li[rr] + lij[rr];
+                    }
+                    
+                    // Compute O_i (Br, d)  <--  (l_i O_i + P_ij @ V_j) / l_new
+                    // s.t. P_ij and V_j is matmul, l_i and O_i is elementwise mul.
+
+
+                    // Write blocks O_i and l_new back to O and l in main memory
+
+                }
+            }
+        }
+    }
 
     // DO NOT EDIT THIS RETURN STATEMENT //
     // It formats your C++ Vector O back into a Tensor of Shape (B, H, N, d) and returns it //
