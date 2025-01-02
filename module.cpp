@@ -381,7 +381,7 @@ torch::Tensor myFlashAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
     // Sij, Pij are passed in with Shape: (Br, Bc)
     // Kj, Vj are passed in with Shape: (Bc, d)
     // Qi, Oi, and PV  are passed in with Shape: (Br, d)
-    // L in passed in with Shape: (N)
+    // L is passed in with Shape: (N)
     // Li, Lij, and Lnew are passed in with shape (Br)
 
     //Make O Tensor with Shape (B, H, N, d)
@@ -408,6 +408,10 @@ torch::Tensor myFlashAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
     for (int b = 0; b < B; b++) {
         // Loop over heads
         for (int h = 0; h < H; h++) {
+            // Initialize l to 0 for this b and h
+            for (int n_ = 0; n_ < N; n_++) {
+                l[n_] = 0.0f; 
+            }
 
             // Loop over Tc = ceil(N / Bc) blocks
             for (int j0 = 0; j0 < N; j0 += Bc) {
@@ -415,9 +419,9 @@ torch::Tensor myFlashAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
 
                 // Load Kj and Vj, both have shape (Bc, d), to local memory blocks
                 for (int c = j0; c < j_max; c++) {
-                    for (int r = 0; r < d; r++) {
-                        Kj[(c - j0)*d + r] = fourDimRead(K, b, h, c, r, H, N, d); // K[b][h][c][r]
-                        Vj[(c - j0)*d + r] = fourDimRead(V, b, h, c, r, H, N, d); // V[b][h][c][r]
+                    for (int k = 0; k < d; k++) {
+                        Kj[(c - j0) * d + k] = fourDimRead(K, b, h, c, k, H, N, d); // K[b][h][c][k]
+                        Vj[(c - j0) * d + k] = fourDimRead(V, b, h, c, k, H, N, d); // V[b][h][c][k]
                     }
                 }
 
@@ -428,9 +432,9 @@ torch::Tensor myFlashAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
                     // Load Q_i, O_i and l_i to local memory
                     // Q_i, O_i, PV have shape (Br, d); l_i, l_ij, l_new have shape (Br)
                     for (int r = i0; r < i_max; r++) {
-                        for (int c = 0; c < d; c++) {
-                            Qi[(r - i0) * d + c] = fourDimRead(Q, b, h, r, c, H, N, d);
-                            Oi[(r - i0) * d + c] = fourDimRead(O, b, h, r, c, H, N, d);
+                        for (int k = 0; k < d; k++) {
+                            Qi[(r - i0) * d + k] = fourDimRead(Q, b, h, r, k, H, N, d);
+                            Oi[(r - i0) * d + k] = fourDimRead(O, b, h, r, k, H, N, d);
                         }
                         li[r - i0] = l[r];
                     }
@@ -443,7 +447,7 @@ torch::Tensor myFlashAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
                         for (int c = j0; c < j_max; c++) {
                             int cc = c - j0; // local column index
 
-                            float qkt_val = Sij[rr * Bc + cc];
+                            float qkt_val = 0.0f;
                             for (int k = 0; k < d; k++) {
                                 float q_val = Qi[rr * d + k]; // Qi[r - i0][k];
                                 float k_val = Kj[cc * d + k]; // Kj[c - j0][k];
@@ -469,12 +473,30 @@ torch::Tensor myFlashAttention(torch::Tensor QTensor, torch::Tensor KTensor, tor
                     
                     // Compute O_i (Br, d)  <--  (l_i O_i + P_ij @ V_j) / l_new
                     // s.t. P_ij and V_j is matmul, l_i and O_i is elementwise mul.
-
+                    for (int r = i0; r < i_max; r++) {
+                        int rr = r - i0;
+                        // Compute P_ij (Br, Bc) @ V_j (Bc, d)
+                        for (int k = 0; k < d; k++) {
+                            float pv_val = 0.0;
+                            for (int c = 0; c < Bc; c++) {
+                                float p_val = Pij[rr * Bc + c];
+                                float v_val = Vj[c * d + k]; // Vj[c][k]
+                                pv_val += p_val * v_val;
+                            }
+                            Oi[rr * d + k] = (li[rr] * Oi[rr * d + k] + pv_val) / lnew[rr];
+                        }
+                    }
 
                     // Write blocks O_i and l_new back to O and l in main memory
+                    for (int r = i0; r < i_max; r++) {
+                        for (int k = 0; k < d; k++) {
+                            fourDimWrite(O, b, h, r, k, H, N, d, Oi[(r - i0) * d + k]);
+                        }
+                        l[r] = lnew[r - i0];
+                    }
 
-                }
-            }
+                }   // end for loop over Tr
+            }   // end for loop over Tc
         }
     }
 
